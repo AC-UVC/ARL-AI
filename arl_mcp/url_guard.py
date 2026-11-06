@@ -48,9 +48,11 @@ def _resolver(host: str, port: int):
     return socket.getaddrinfo(host, port)
 
 
-def validate_url(url: str, *, resolve_dns: bool = True) -> str:
-    """校验一个「数据驱动」的 URL，返回原字符串；不通过则抛 UrlBlocked。
+def validate_url_with_ips(url: str, *, resolve_dns: bool = True):
+    """校验一个「数据驱动」的 URL，返回 (原字符串, 校验通过的公网 IP 列表)。
 
+    调用方应使用返回的 IP 直连（配合 Host/SNI 头），消除 DNS Rebinding
+    的 TOCTOU 窗口：校验用的解析结果与实际连接的 IP 强制一致。
     resolve_dns=False 时跳过 DNS 解析（用于可信部署配置或离线测试）。
     """
     if not url or not url.strip():
@@ -65,7 +67,6 @@ def validate_url(url: str, *, resolve_dns: bool = True) -> str:
     if host.lower() in BLOCKED_HOSTNAMES:
         raise UrlBlocked(f"禁止访问 {host}")
 
-    # IP 字面量直接判；域名则解析出所有 IP 逐一判
     try:
         ipaddress.ip_address(host)
         literal = host
@@ -75,13 +76,25 @@ def validate_url(url: str, *, resolve_dns: bool = True) -> str:
     if literal is not None:
         if _ip_blocked(literal):
             raise UrlBlocked(f"禁止访问私有/环回/保留地址: {host}")
+        return url, [literal]
     elif resolve_dns:
         port = pr.port or (443 if pr.scheme == "https" else 80)
         try:
             infos = _resolver(host, port)
         except OSError as e:
             raise UrlBlocked(f"域名解析失败: {host} ({e})")
+        ips = []
         for info in infos:
-            if _ip_blocked(info[4][0]):
+            ip = info[4][0]
+            if _ip_blocked(ip):
                 raise UrlBlocked(f"{host} 解析到私有/保留地址，已拦截")
+            if ip not in ips:
+                ips.append(ip)
+        return url, ips
+    return url, []
+
+
+def validate_url(url: str, *, resolve_dns: bool = True) -> str:
+    """校验一个「数据驱动」的 URL，返回原字符串；不通过则抛 UrlBlocked。"""
+    validate_url_with_ips(url, resolve_dns=resolve_dns)
     return url

@@ -31,12 +31,13 @@ done
 ARL_DIR=${ARL_DIR:-/opt/docker_arl}
 MCP_DIR="$ARL_DIR/mcp"
 SERVICE_NAME=mcp-ai
-ASSETS="$(cd "$(dirname "$0")" && pwd)"
-if [[ ! -d "$ASSETS/arl_mcp" ]]; then
-  up="$ASSETS"
+FILE_DIR="$(cd "$(dirname "$0")" && pwd)"   # mcp_service.py / mcp_panel.js 所在
+PKG_DIR="$FILE_DIR"                          # arl_mcp/ 所在（git 仓库布局在上一级）
+if [[ ! -d "$PKG_DIR/arl_mcp" ]]; then
+  up="$PKG_DIR"
   for _ in 1 2 3; do
     up="$(dirname "$up")"
-    [[ -d "$up/arl_mcp" ]] && ASSETS="$up" && break
+    [[ -d "$up/arl_mcp" ]] && PKG_DIR="$up" && break
   done
 fi
 
@@ -54,7 +55,7 @@ docker ps --format '{{.Names}}' | grep -qx "$WEB_CONTAINER" \
   || die "web 容器 $WEB_CONTAINER 未运行（原灯塔必须在线）"
 ss -lnt | grep -qE ":$MCP_PORT |:$ADMIN_PORT " && die "端口 $MCP_PORT/$ADMIN_PORT 已被占用"
 [[ -f "$ARL_DIR/docker-compose.yml" ]] || die "未找到 $ARL_DIR/docker-compose.yml"
-[[ -f "$ASSETS/arl_mcp/server.py" && -f "$ASSETS/mcp_service.py" && -f "$ASSETS/mcp_panel.js" ]] \
+[[ -f "$PKG_DIR/arl_mcp/server.py" && -f "$FILE_DIR/mcp_service.py" && -f "$FILE_DIR/mcp_panel.js" ]] \
   || die "缺少 arl_mcp/ 与 mcp_service.py、mcp_panel.js"
 [[ -f "$ARL_DIR/docker-compose.override.yml" ]] \
   && die "已存在 override（可能装过），先删除再装: rm $ARL_DIR/docker-compose.override.yml"
@@ -71,7 +72,7 @@ docker exec "$WEB_CONTAINER" cp /etc/nginx/nginx.conf /tmp/nginx.conf.orig 2>/de
 say "从 $WEB_CONTAINER 提取前端并注入 MCP 栏目"
 rm -rf "$ARL_DIR/frontend-mcp"
 docker cp "$WEB_CONTAINER:/code/frontend" "$ARL_DIR/frontend-mcp"
-cp -a "$ASSETS/mcp_panel.js" "$ARL_DIR/frontend-mcp/mcp_panel.js"
+cp -a "$FILE_DIR/mcp_panel.js" "$ARL_DIR/frontend-mcp/mcp_panel.js"
 python3 - "$ARL_DIR/frontend-mcp/index.html" <<'PYEOF'
 import sys, io
 p = sys.argv[1]
@@ -144,8 +145,8 @@ echo "web 已恢复，注入生效"
 # ---------- MCP 服务 ----------
 say "安装 MCP 服务"
 mkdir -p "$MCP_DIR/arl_mcp"
-cp -a "$ASSETS"/arl_mcp/*.py "$MCP_DIR/arl_mcp/"
-cp -a "$ASSETS/mcp_service.py" "$MCP_DIR/mcp_service.py"
+cp -a "$PKG_DIR"/arl_mcp/*.py "$MCP_DIR/arl_mcp/"
+cp -a "$FILE_DIR/mcp_service.py" "$MCP_DIR/mcp_service.py"
 python3 -m venv "$MCP_DIR/.venv"
 "$MCP_DIR/.venv/bin/pip" install -q --upgrade pip \
   -i "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"

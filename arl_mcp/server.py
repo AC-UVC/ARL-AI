@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -14,7 +14,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from . import config, fs_sandbox
 from .arl_client import ARLApiError, ARLClient, get_client, set_client
-from .url_guard import UrlBlocked, validate_url  # noqa: F401 (UrlBlocked 供工具层捕获)
+from .url_guard import (UrlBlocked, validate_url,  # noqa: F401
+                        validate_url_with_ips)
 
 mcp = FastMCP(
     "arl-mcp",
@@ -286,17 +287,36 @@ def fs_clean_tmp() -> str:
 
 # ================================================================= 网络工具
 
+def _pinned_get(url: str, ips: list, timeout: float = 15) -> httpx.Response:
+    """向已通过校验的 URL 发 GET，连接强制使用校验时解析的 IP（消除
+    DNS Rebinding TOCTOU）。https 经 sni_hostname 扩展保持原域名的
+    SNI 与证书校验。"""
+    pr = urlsplit(url)
+    host = pr.hostname
+    port = pr.port or (443 if pr.scheme == "https" else 80)
+    ip = ips[0]
+    netloc = f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
+    pinned = f"{pr.scheme}://{netloc}{pr.path or '/'}"
+    if pr.query:
+        pinned += "?" + pr.query
+    return httpx.get(pinned, timeout=timeout, follow_redirects=False,
+                     headers={"Host": host, "User-Agent": "ARL-MCP/1.0",
+                              "Accept": "*/*",
+                              "Accept-Encoding": "identity"},
+                     extensions={"sni_hostname": host})
+
+
 @mcp.tool()
 def fetch_url(url: str, max_bytes: int = 20000) -> str:
     """安全抓取一个公网 URL 的响应文本（快速看一眼页面/接口内容用，资产收集请走 arl_create_task）。
-    仅允许 http/https；拒绝 localhost/内网/保留地址；重定向逐跳校验，导向内网即中断。"""
+    仅允许 http/https；拒绝 localhost/内网/保留地址；重定向逐跳校验，导向内网即中断；
+    连接强制使用校验时解析的 IP（防 DNS Rebinding）。"""
     try:
-        current = validate_url(url)
+        current, ips = validate_url_with_ips(url)
     except UrlBlocked as e:
         return _j({"error": f"URL 被拦截: {e}"})
     try:
-        resp = httpx.get(current, timeout=15, follow_redirects=False,
-                         headers={"User-Agent": "ARL-MCP/1.0"})
+        resp = _pinned_get(current, ips)
     except httpx.HTTPError as e:
         return _j({"error": f"请求失败: {e}"})
     for _ in range(5):
@@ -306,12 +326,11 @@ def fetch_url(url: str, max_bytes: int = 20000) -> str:
         if not loc:
             break
         try:
-            current = validate_url(urljoin(str(resp.url), loc))
+            current, ips = validate_url_with_ips(urljoin(str(resp.url), loc))
         except UrlBlocked as e:
             return _j({"error": f"重定向被拦截: {e}"})
         try:
-            resp = httpx.get(current, timeout=15, follow_redirects=False,
-                             headers={"User-Agent": "ARL-MCP/1.0"})
+            resp = _pinned_get(current, ips)
         except httpx.HTTPError as e:
             return _j({"error": f"跟随重定向失败: {e}"})
     text = resp.text
