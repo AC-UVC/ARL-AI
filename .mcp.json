@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "arl": {
+      "command": "C:\\C临时文件\\ARL-AI\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "arl_mcp.server"],
+      "env": {
+        "PYTHONPATH": "C:\\C临时文件\\ARL-AI",
+        "ARL_MCP_WORKSPACE": "C:\\C临时文件\\ARL-AI",
+        "ARL_URL": "http://127.0.0.1:5003",
+        "ARL_USER": "admin",
+        "ARL_PASS": "arlpass"
+      }
+    }
+  }
+}
