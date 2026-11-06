@@ -48,6 +48,10 @@ AI 客户端 ── X-API-Key 请求头 ─────────────�
 | 调用密钥 | 运行时生成 48 位 hex，可重置；缺失/错误一律 401 |
 | 客户端配置 | 一键复制带 `X-API-Key` 请求头的 MCP 客户端 JSON |
 
+## 效果预览
+<img width="2560" height="1408" alt="image" src="https://github.com/user-attachments/assets/6db0e851-9447-40b1-88f1-b7b1ab84c45b" />
+
+
 ## 部署到服务器
 
 ### 方式零：叠加到已有灯塔（数据零拷贝，推荐存量场景）
