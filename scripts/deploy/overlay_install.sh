@@ -85,9 +85,15 @@ docker exec "$WEB_CONTAINER" cp /etc/nginx/nginx.conf /tmp/nginx.conf.orig 2>/de
   || warn "nginx.conf 容器内备份失败（继续，容器内文件本来就会被挂载覆盖）"
 
 # ---------- 前端注入（独立目录） ----------
-say "从 $WEB_CONTAINER 提取前端并注入 MCP 栏目"
+# 从镜像提取出厂原始前端/nginx（重装时容器内 /code/frontend 已被挂载覆盖，不可用）
+say "从镜像提取原始前端并注入 MCP 栏目"
+WEB_IMAGE=$(docker inspect "$WEB_CONTAINER" --format '{{.Config.Image}}')
+TMP_C=$(docker create "$WEB_IMAGE") || die "无法从镜像 $WEB_IMAGE 创建临时容器"
 rm -rf "$ARL_DIR/frontend-mcp"
-docker cp "$WEB_CONTAINER:/code/frontend" "$ARL_DIR/frontend-mcp"
+docker cp "$TMP_C:/code/frontend" "$ARL_DIR/frontend-mcp" || { docker rm -f "$TMP_C" >/dev/null 2>&1; die "前端提取失败（镜像内未找到 /code/frontend）"; }
+docker cp "$TMP_C:/etc/nginx/nginx.conf" "$ARL_DIR/nginx-mcp.conf" || { docker rm -f "$TMP_C" >/dev/null 2>&1; die "nginx.conf 提取失败"; }
+docker rm "$TMP_C" >/dev/null
+[[ -f "$ARL_DIR/frontend-mcp/index.html" ]] || die "前端提取不完整（index.html 缺失）"
 cp -a "$FILE_DIR/mcp_panel.js" "$ARL_DIR/frontend-mcp/mcp_panel.js"
 python3 - "$ARL_DIR/frontend-mcp/index.html" <<'PYEOF'
 import sys, io
@@ -105,7 +111,6 @@ PYEOF
 
 # ---------- nginx 注入（独立文件） ----------
 say "生成注入版 nginx.conf"
-docker exec "$WEB_CONTAINER" cat /etc/nginx/nginx.conf > "$ARL_DIR/nginx-mcp.conf"
 python3 - "$ARL_DIR/nginx-mcp.conf" "$ADMIN_PORT" <<'PYEOF'
 import sys, io
 p, admin_port = sys.argv[1], sys.argv[2]
