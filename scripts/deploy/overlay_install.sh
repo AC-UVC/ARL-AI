@@ -50,17 +50,33 @@ say "前置检查"
 command -v docker >/dev/null || die "未安装 docker"
 docker compose version >/dev/null 2>&1 || die "未安装 docker compose v2"
 command -v python3 >/dev/null || die "未安装 python3"
-python3 -m venv --help >/dev/null 2>&1 || die "python3 缺 venv 模块"
+if ! python3 -c "import ensurepip" >/dev/null 2>&1; then
+  say "缺 python3-venv，自动安装（Ubuntu 需要它 venv 里才有 pip）"
+  if command -v apt-get >/dev/null; then
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y -qq python3-venv python3-pip >/dev/null 2>&1 \
+      || die "python3-venv 自动安装失败，请手动执行: apt-get install -y python3-venv python3-pip"
+  elif command -v dnf >/dev/null; then
+    dnf install -y -q python3-pip >/dev/null 2>&1 || die "python3-pip 自动安装失败"
+  elif command -v yum >/dev/null; then
+    yum install -y -q python3-pip >/dev/null 2>&1 || die "python3-pip 自动安装失败"
+  else
+    die "系统缺少 python venv/pip 支持，请手动安装后重试"
+  fi
+fi
 docker ps --format '{{.Names}}' | grep -qx "$WEB_CONTAINER" \
   || die "web 容器 $WEB_CONTAINER 未运行（原灯塔必须在线）"
 ss -lnt | grep -qE ":$MCP_PORT |:$ADMIN_PORT " && die "端口 $MCP_PORT/$ADMIN_PORT 已被占用"
 [[ -f "$ARL_DIR/docker-compose.yml" ]] || die "未找到 $ARL_DIR/docker-compose.yml"
 [[ -f "$PKG_DIR/arl_mcp/server.py" && -f "$FILE_DIR/mcp_service.py" && -f "$FILE_DIR/mcp_panel.js" ]] \
   || die "缺少 arl_mcp/ 与 mcp_service.py、mcp_panel.js"
-[[ -f "$ARL_DIR/docker-compose.override.yml" ]] \
-  && die "已存在 override（可能装过），先删除再装: rm $ARL_DIR/docker-compose.override.yml"
+if [[ -f "$ARL_DIR/docker-compose.override.yml" ]]; then
+  grep -q frontend-mcp "$ARL_DIR/docker-compose.override.yml" \
+    && warn "检测到上次安装残留（可能中途失败），继续覆盖安装（幂等）" \
+    || die "已存在第三方 docker-compose.override.yml，为避免冲突请人工确认后移除"
+fi
 curl -sk "https://127.0.0.1:$WEB_PORT/" | grep -q mcp_panel.js \
-  && die "检测到前端已注入，勿重复安装"
+  && warn "前端已注入过 MCP，继续覆盖（幂等）"
 
 # ---------- 备份 ----------
 say "备份原状态（回滚依据）"
@@ -147,7 +163,8 @@ say "安装 MCP 服务"
 mkdir -p "$MCP_DIR/arl_mcp"
 cp -a "$PKG_DIR"/arl_mcp/*.py "$MCP_DIR/arl_mcp/"
 cp -a "$FILE_DIR/mcp_service.py" "$MCP_DIR/mcp_service.py"
-python3 -m venv "$MCP_DIR/.venv"
+python3 -m venv --clear "$MCP_DIR/.venv"
+[[ -x "$MCP_DIR/.venv/bin/pip" ]] || die "venv 内无 pip（python3-venv 未装好），请手动: apt-get install -y python3-venv"
 "$MCP_DIR/.venv/bin/pip" install -q --upgrade pip \
   -i "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 "$MCP_DIR/.venv/bin/pip" install -q "mcp>=1.2,<2" httpx uvicorn \
