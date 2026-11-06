@@ -50,7 +50,25 @@ AI 客户端 ── X-API-Key 请求头 ─────────────�
 
 ## 部署到服务器
 
-### 方式一：一键部署（推荐）
+### 方式零：叠加到已有灯塔（数据零拷贝，推荐存量场景）
+
+原灯塔数据多不想拷贝？直接在它上面叠加，**不新起灯塔、不碰数据库**：
+
+```bash
+cd scripts/deploy
+bash overlay_install.sh --dir /opt/docker_arl --web-port 5003 \
+     --web-container arl_web --mcp-port 8010 --admin-port 8011 \
+     --arl-pass <原灯塔密码> --public-ip <公网IP可选>
+```
+
+原理与保障：
+- compose 增量走 `docker-compose.override.yml`（compose 原生合并），**原 docker-compose.yml 零改动**；
+  回滚 = 删 override 等三个文件 + `docker compose up -d web`（脚本末尾打印完整回滚命令）
+- 前端注入放独立目录 `frontend-mcp/`，nginx 注入版为独立文件 `nginx-mcp.conf`，均以挂载方式生效
+- 重建的只有 web 容器（约 30 秒界面中断）；worker/scheduler/mongodb 全程不动，**正在跑的扫描不受影响**
+- MCP 服务 systemd 直连原灯塔 API，原灯塔全部历史数据即刻可读
+
+### 方式一：一键部署（新服务器）
 
 把工作目录拷到服务器，进入 `scripts/deploy/` 执行：
 
