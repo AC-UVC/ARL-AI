@@ -153,7 +153,9 @@ docker compose -f "$ARL_DIR/docker-compose.yml" \
 # ---------- 重建 web 容器（worker/scheduler/数据不动） ----------
 say "重建 web 容器（约 30 秒界面中断；正在跑的扫描任务不受影响）"
 cd "$ARL_DIR"
-docker compose up -d web
+# --force-recreate：重装时配置未变 compose 不会重建容器，但宿主目录已被
+# rm -rf 重建，旧容器还绑着已删除的目录 inode（容器内目录为空 → 403）
+docker compose up -d --force-recreate web
 ok=""
 for i in $(seq 1 30); do
   [[ "$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$WEB_PORT/" || true)" == "200" ]] && ok=1 && break
