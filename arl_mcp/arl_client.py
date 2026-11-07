@@ -3,6 +3,8 @@
 要点（与 ARL 源码 app/routes/ 对齐）：
 - 登录: POST /api/user/login {username, password} -> data.token；
 - 后续请求 header 为 ``Token: <token>``（裸 token，无 Bearer）；
+- ⚠️ ARL 每个用户只保存一个 token、登录即覆盖：MCP 必须用专用账号
+  （如 arl_mcp）登录，与人共用 admin 账号会把浏览器登录态顶下线；
 - 所有响应 HTTP 状态恒为 200，成功与否看 body 的 ``code`` 字段（200 才成功）；
 - 任务创建 body 是扁平结构（开关直接在顶层，不是嵌套 task_data）；
 - 任务删除/批量停止/重启是 POST，停止单个任务是 GET /api/task/stop/<id>。

@@ -5,17 +5,22 @@
 #   - compose 增量走 docker-compose.override.yml（compose 原生合并），原 docker-compose.yml 不动；
 #     回滚 = 删 override 文件 + docker compose up -d web
 #   - 前端注入目录独立（frontend-mcp），不覆盖镜像内文件
-#   - MCP 服务跑在宿主机 systemd，只连灯塔 API，不碰数据库
+#   - MCP 服务跑在宿主机 systemd，只连灯塔 API；
+#   - 会在灯塔 Mongo 里【新增】一个 arl_mcp 专用账号（不动 admin 及任何业务数据）：
+#     ARL 每用户只存一个 token、登录即覆盖旧 token，若 MCP 与人共用 admin 账号，
+#     AI 每次调用都会把浏览器的登录态顶下线。专用账号只覆盖自己的 token。
+#     （账号口令仅存于 systemd unit 的 Environment，安装结束打印一次）
 #
 # 依赖：docker + docker compose v2 + python3(venv/pip)；root 执行。
 # 用法（同目录备好 arl_mcp/ mcp_service.py mcp_panel.js）：
 #   bash overlay_install.sh --dir /opt/docker_arl --web-port 5003 \
 #        --web-container arl_web --mcp-port 8010 --admin-port 8011 \
-#        --arl-pass <原灯塔密码> --public-ip <公网IP可选>
+#        --public-ip <公网IP可选>
+#   （--arl-pass 已废弃：MCP 不再用 admin 凭据，保留参数仅为兼容旧命令行）
 set -euo pipefail
 
 WEB_PORT=5003; WEB_CONTAINER=arl_web; MCP_PORT=8010; ADMIN_PORT=8011
-ARL_PASS=arlpass; PUBLIC_IP=""
+PUBLIC_IP=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dir) ARL_DIR=$2; shift 2;;
@@ -23,7 +28,7 @@ while [[ $# -gt 0 ]]; do
     --web-container) WEB_CONTAINER=$2; shift 2;;
     --mcp-port) MCP_PORT=$2; shift 2;;
     --admin-port) ADMIN_PORT=$2; shift 2;;
-    --arl-pass) ARL_PASS=$2; shift 2;;
+    --arl-pass) warn "--arl-pass 已废弃（MCP 改用专用账号 arl_mcp），参数忽略"; shift 2;;
     --public-ip) PUBLIC_IP=$2; shift 2;;
     *) echo "未知参数: $1"; exit 1;;
   esac
@@ -165,6 +170,37 @@ done
 curl -sk "https://127.0.0.1:$WEB_PORT/" | grep -q mcp_panel.js || die "前端注入未生效"
 echo "web 已恢复，注入生效"
 
+# ---------- MCP 专用账号（防挤占 admin 登录态） ----------
+say "创建 MCP 专用账号 arl_mcp（ARL 登录会覆盖同账号旧 token，专用账号互不影响）"
+MONGO_CONTAINER=$(docker ps --format '{{.Names}}' | grep -i mongo | head -1)
+[[ -n "$MONGO_CONTAINER" ]] || die "未找到 mongo 容器"
+MONGO_CLIENT=$(docker exec "$MONGO_CONTAINER" sh -c 'command -v mongosh || command -v mongo')
+[[ -n "$MONGO_CLIENT" ]] || die "mongo 容器内无 mongo/mongosh 客户端"
+read -r MONGO_USER MONGO_PASS MONGO_DB <<< "$(docker exec "$WEB_CONTAINER" python3 -c "
+import re
+s = open('/code/app/config.yaml').read()
+m = re.search(r\"URI\s*:\s*'mongodb://([^:]+):([^@]+)@\", s)
+d = re.search(r\"DB\s*:\s*'([^']+)'\", s)
+print(m.group(1), m.group(2), d.group(1))
+")"
+[[ -n "$MONGO_DB" ]] || die "无法从 web 容器读取 MONGO 配置"
+MCP_USER_NAME=arl_mcp
+MCP_USER_PASS=$(python3 -c "import secrets;print(secrets.token_urlsafe(18))")
+HASH=$(python3 -c "import hashlib;print(hashlib.md5(('arlsalt!@#'+'$MCP_USER_PASS').encode()).hexdigest())")
+docker exec "$MONGO_CONTAINER" "$MONGO_CLIENT" -u "$MONGO_USER" -p "$MONGO_PASS" \
+  --authenticationDatabase admin --quiet --eval "
+var c = db.getSiblingDB('$MONGO_DB').user;
+var doc = c.findOne({username: '$MCP_USER_NAME'});
+if (doc) { c.updateOne({username: '$MCP_USER_NAME'}, {\$set: {password: '$HASH'}}); }
+else { c.insertOne({username: '$MCP_USER_NAME', password: '$HASH', token: null}); }
+print('arl_mcp ready')
+" | grep -q "arl_mcp ready" || die "创建 arl_mcp 账号失败"
+curl -sk -X POST "https://127.0.0.1:$WEB_PORT/api/user/login" \
+  -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$MCP_USER_NAME\",\"password\":\"$MCP_USER_PASS\"}" \
+  | grep -q '"code":200' || die "arl_mcp 登录验证失败（灯塔 API 不通或账号异常）"
+echo "arl_mcp 账号就绪，登录验证通过"
+
 # ---------- MCP 服务 ----------
 say "安装 MCP 服务"
 mkdir -p "$MCP_DIR/arl_mcp"
@@ -188,8 +224,8 @@ WorkingDirectory=$MCP_DIR
 Environment=PYTHONPATH=$MCP_DIR
 Environment=ARL_URL=https://127.0.0.1:$WEB_PORT
 Environment=ARL_MCP_WORKSPACE=$MCP_DIR
-Environment=ARL_USER=admin
-Environment=ARL_PASS=$ARL_PASS
+Environment=ARL_USER=$MCP_USER_NAME
+Environment=ARL_PASS=$MCP_USER_PASS
 Environment=MCP_PORT=$MCP_PORT
 Environment=MCP_ADMIN_PORT=$ADMIN_PORT
 ${PUBLIC_IP:+Environment=MCP_PUBLIC_IP=$PUBLIC_IP
@@ -227,6 +263,7 @@ cat <<EOF
   MCP 服务        : http://$IP_SHOW:$MCP_PORT/mcp  （默认关闭，UI 里开）
   服务管理        : systemctl {status|restart|stop} $SERVICE_NAME
   密钥            : UI 面板里复制（X-API-Key 请求头鉴权）
+  MCP 专用账号    : $MCP_USER_NAME / $MCP_USER_PASS（勿用此账号登录浏览器；重装会重置口令）
   MCP 服务目录    : $MCP_DIR
   【回滚】完全卸载 :
     systemctl disable --now $SERVICE_NAME && rm -f /etc/systemd/system/$SERVICE_NAME.service
