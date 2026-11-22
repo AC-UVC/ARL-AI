@@ -1,6 +1,9 @@
-/* ARL 灯塔 MCP 栏目注入脚本 v4（UI 精修版）
+/* ARL 灯塔 MCP 栏目注入脚本 v8
  * 菜单项：结构与样式完全对齐原生（SVG sprite + menu-title + scoped 属性）。
  * 管理面板：深色渐变头部 + 白底浮起卡片 + Switch 开关，antd 视觉风格。
+ * 全局配置：第二个注入栏目，像任务管理一样在内容区渲染独立页面（不改灯塔前端路由），
+ *   卡片式编辑灯塔 config.yaml（FOFA/GitHub/钉钉/飞书/企微/邮件/代理/第三方测绘插件），
+ *   保存后重启容器生效。（漏扫补充/漏扫配置/POC添加已下线，完整实现存于 git stash）
  */
 (function () {
   if (window.__ARL_MCP_PANEL__) return;
@@ -83,7 +86,26 @@
     /* 提示与浮层 */
     '.mcp-tip{font-size:12px;color:#bfbfbf;margin-top:8px;line-height:1.65;}',
     '.mcp-toast{position:fixed;top:24px;left:50%;transform:translate(-50%,0);background:#fff;border-radius:6px;box-shadow:0 4px 14px rgba(0,21,41,.18);padding:9px 18px;font-size:14px;color:rgba(0,0,0,.75);z-index:10002;animation:mcpToastIn .2s ease-out;display:flex;align-items:center;gap:8px;}',
-    '.mcp-toast:before{content:"";width:6px;height:6px;border-radius:50%;background:#52c41a;flex:none;}'
+    '.mcp-toast:before{content:"";width:6px;height:6px;border-radius:50%;background:#52c41a;flex:none;}',
+
+    /* 全局配置页（内容区页面切换） */
+    '.mcp-page{background:#f0f2f5;min-height:calc(100vh - 64px);padding:22px;animation:mcpPageIn .45s cubic-bezier(.25,.7,.3,1);}',
+    '@keyframes mcpPageIn{from{opacity:0;transform:translateX(28px)}to{opacity:1;transform:none}}',
+    '.mcp-page-head{background:#fff;border-radius:8px;padding:18px 22px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,21,41,.06);display:flex;justify-content:space-between;align-items:center;}',
+    '.mcp-page-title{font-size:18px;font-weight:600;color:rgba(0,0,0,.8);}',
+    '.mcp-page-sub{font-size:13px;color:#8c8c8c;margin-top:0;}',
+    '.mcp-note{font-size:13px;color:rgba(0,0,0,.55);margin:0 0 16px 4px;line-height:1.7;}',
+    '.mcp-page-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px 18px;align-items:start;}',
+    '.mcp-page .mcp-card{padding:16px 18px;box-shadow:0 1px 6px rgba(0,21,41,.08);}',
+    '.mcp-page .mcp-card-title{font-size:15px;margin-bottom:14px;}',
+    '.mcp-field-label{flex:none;width:160px;font-size:14px;color:rgba(0,0,0,.75);}',
+    '.mcp-field-row{display:flex;align-items:center;gap:10px;margin-top:10px;}',
+    '.mcp-page .mcp-input{font-size:15px;padding:6px 11px;}',
+    '.mcp-page .mcp-tip{font-size:13px;}',
+    '.mcp-page .mcp-btn{font-size:14px;padding:5px 16px;}',
+    '.mcp-plugin-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:4px;}',
+    '.mcp-plugin{border:1px solid #eef0f2;border-radius:6px;padding:12px 14px;background:#fafafa;}',
+    '.mcp-plugin-name{font-size:14px;font-weight:600;color:rgba(0,0,0,.7);margin-bottom:4px;}'
   ].join('');
   var style = document.createElement('style');
   style.textContent = css;
@@ -314,26 +336,27 @@
   }
 
   /* ---------------- 导航注入（完全对齐原生项） ---------------- */
-  function makeItem(attrs) {
+  function makeMenuItem(native, iconId, label, onClick, extraAttr) {
     var li = el('li', {
       'class': 'ant-menu-item', 'role': 'menuitem', 'data-mcp-item': '1',
       'style': 'padding-left:24px;cursor:pointer;'
     });
-    for (var k in attrs.li) li.setAttribute(k, attrs.li[k]);
+    if (extraAttr) for (var x in extraAttr) li.setAttribute(x, extraAttr[x]);
+    for (var k in native.li) li.setAttribute(k, native.li[k]);
     var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'svg-icon anticon');
     svg.setAttribute('aria-hidden', 'true');
     svg.setAttribute('width', '14');
     svg.setAttribute('height', '14');
     svg.style.verticalAlign = '-0.125em';
-    for (var s in attrs.svg) svg.setAttribute(s, attrs.svg[s]);
+    for (var s in native.svg) svg.setAttribute(s, native.svg[s]);
     var use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-    use.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', '#compass');
+    use.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', '#' + iconId);
     svg.appendChild(use);
-    var span = el('span', { 'class': 'menu-title' }, 'MCP服务器');
+    var span = el('span', { 'class': 'menu-title' }, label);
     li.appendChild(svg);
     li.appendChild(span);
-    li.onclick = openPanel;
+    li.onclick = onClick;
     return li;
   }
 
@@ -368,9 +391,218 @@
     var hosts = horizontal.concat(vertical);
     for (var j = 0; j < hosts.length; j++) {
       if (hosts[j].querySelector('li[data-mcp-item="1"]')) return;
-      hosts[j].appendChild(makeItem(nativeItemAttrs()));
+      var native = nativeItemAttrs();
+      hosts[j].appendChild(makeMenuItem(native, 'compass', 'MCP服务器', openPanel));
+      hosts[j].appendChild(makeMenuItem(native, 'policy', '全局配置', openGlobalPage,
+        { 'data-mcp-global': '1' }));
       return;
     }
+  }
+
+  function apiJson(method, url, body, cb) {
+    var opts = { method: method };
+    if (body !== undefined) {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify(body);
+    }
+    fetch(url, opts).then(function (r) { return r.json(); }).then(cb)
+      .catch(function () { cb(null); });
+  }
+
+  /* ---------------- 全局配置页（内容区页面切换，像任务管理） ---------------- */
+  var globalPageState = null; // { page, hidden:[], savedSel, headerTitle }
+
+  function _headerTitleEl() {
+    return document.querySelector('.ant-layout-header .page-title');
+  }
+
+  function openGlobalPage() {
+    if (globalPageState) return;
+    var content = document.querySelector('.ant-layout-content');
+    if (!content) { toast('未找到内容区容器'); return; }
+
+    /* 顶栏标题同步（灯塔页头显示当前栏目名） */
+    var headerEl = _headerTitleEl();
+    var headerTitle = headerEl ? headerEl.textContent : '';
+    if (headerEl) headerEl.textContent = '全局配置';
+
+    var page = el('div', { 'class': 'mcp-page' });
+
+    /* 页头：标题 + 保存 / 重启按钮 */
+    var head = el('div', { 'class': 'mcp-page-head' });
+    var left = el('div', { style: 'display:flex;align-items:center;gap:16px;' });
+    left.appendChild(el('div', { 'class': 'mcp-page-title' }, '全局配置'));
+    left.appendChild(el('span', { 'class': 'mcp-page-sub' },
+      '灯塔 config.yaml 辅助编辑 · 保存后需重启容器生效'));
+    head.appendChild(left);
+    var inputs = {};   // path → input 元素
+    var right = el('div', { style: 'display:flex;gap:10px;' });
+    right.appendChild(btn('保存全部改动', 'primary', function () { saveGlobal(inputs); }));
+    right.appendChild(btn('重启服务生效', 'danger', function () {
+      if (!confirm('重启后配置才生效；会中断进行中的扫描任务，确定重启？')) return;
+      var b = right.lastChild;
+      b.disabled = true; b.textContent = '重启中…';
+      apiJson('POST', API + '/arlconfig', { action: 'restart' }, function (d2) {
+        b.disabled = false; b.textContent = '重启服务生效';
+        if (d2 && d2.error) toast(d2.error);
+        else toast('重启已开始（scheduler → worker → web）');
+      });
+    }));
+    head.appendChild(right);
+    page.appendChild(head);
+
+    /* 内容栅格（数据到达后渲染） */
+    var grid = el('div', { 'class': 'mcp-page-grid' });
+    page.appendChild(grid);
+    var note = el('div', { 'class': 'mcp-note' });
+    note.textContent = '配置加载中…';
+    page.insertBefore(note, grid);
+
+    /* 隐藏原生路由视图，挂载本页面 */
+    var hidden = [];
+    for (var i = 0; i < content.children.length; i++) {
+      var ch = content.children[i];
+      if (ch === page) continue;
+      ch.style.display = 'none';
+      hidden.push(ch);
+    }
+    content.appendChild(page);
+
+    /* 菜单选中态接管 */
+    var savedSel = document.querySelector(
+      'li.ant-menu-item-selected:not([data-mcp-item])');
+    if (savedSel) savedSel.className =
+      savedSel.className.replace('ant-menu-item-selected', '').trim();
+    var mine = document.querySelector('li[data-mcp-global="1"]');
+    if (mine && mine.className.indexOf('ant-menu-item-selected') < 0)
+      mine.className += ' ant-menu-item-selected';
+
+    globalPageState = { page: page, hidden: hidden, savedSel: savedSel,
+      headerEl: headerEl, headerTitle: headerTitle };
+
+    renderGlobal(grid, note, inputs);
+  }
+
+  function closeGlobalPage() {
+    if (!globalPageState) return;
+    var st = globalPageState;
+    globalPageState = null;
+    st.page.remove();
+    for (var i = 0; i < st.hidden.length; i++) st.hidden[i].style.display = '';
+    var mine = document.querySelector('li[data-mcp-global="1"]');
+    if (mine) mine.className =
+      mine.className.replace('ant-menu-item-selected', '').trim();
+    if (st.savedSel && st.savedSel.isConnected &&
+        st.savedSel.className.indexOf('ant-menu-item-selected') < 0)
+      st.savedSel.className += ' ant-menu-item-selected';
+    /* 顶栏标题还原（原生路由切换时 Vue 也会自行更新，此处兜底） */
+    if (st.headerEl && st.headerEl.isConnected && st.headerTitle)
+      st.headerEl.textContent = st.headerTitle;
+  }
+
+  /* 点击原生菜单（含分组）即回到原生页面：Vue 照常导航渲染，本页撤下 */
+  document.addEventListener('click', function (e) {
+    if (!globalPageState || !e.target || !e.target.closest) return;
+    var li = e.target.closest('li.ant-menu-item, li.ant-menu-submenu');
+    if (li && !li.hasAttribute('data-mcp-item')) closeGlobalPage();
+  }, true);
+
+  /* ---------------- 全局配置页渲染 ---------------- */
+  function saveGlobal(inputs) {
+    var values = {};
+    Object.keys(inputs).forEach(function (p) {
+      var pin = inputs[p];
+      if (pin && pin.value !== undefined) values[p] = pin.value;
+    });
+    apiJson('POST', API + '/arlconfig', { action: 'save', values: values },
+      function (d2) {
+        if (d2 && d2.error) { toast(d2.error); return; }
+        if (!d2) { toast('请求失败：管理服务无响应'); return; }
+        toast('已保存 ' + (d2.applied || []).length + ' 项（掩码跳过 ' +
+          (d2.skipped || []).length + ' 项），重启后生效');
+      });
+  }
+
+  function renderGlobal(grid, note, inputs) {
+    var GROUPS = [
+      { title: 'FOFA 资产测绘', paths: ['FOFA.EMAIL', 'FOFA.KEY', 'FOFA.URL'],
+        tip: '中转站账号把接口地址改成对应 baseurl 即可；Email 留空时部分接口不可用。' },
+      { title: 'GitHub 监控', paths: ['GITHUB.TOKEN'],
+        tip: '填 PAT 后 GitHub 监控不再受匿名 API 限流；不填则监控任务空跑。' },
+      { title: '钉钉通知', paths: ['DINGDING.ACCESS_TOKEN', 'DINGDING.SECRET'],
+        tip: '加签机器人两项都必填，缺一不可。' },
+      { title: '飞书通知', paths: ['FEISHU.WEBHOOK_URL', 'FEISHU.SECRET'],
+        tip: 'Webhook 与加签 Secret 两项都必填。' },
+      { title: '企业微信通知', paths: ['WXWORK.WEBHOOK_URL'],
+        tip: '群机器人 Webhook 一项即可用。' },
+      { title: '自定义 Webhook', paths: ['WEBHOOK.URL', 'WEBHOOK.TOKEN'] },
+      { title: '邮件通知',
+        paths: ['EMAIL.HOST', 'EMAIL.PORT', 'EMAIL.USERNAME', 'EMAIL.PASSWORD', 'EMAIL.TO'] },
+      { title: '扫描代理', paths: ['PROXY.HTTP_URL'],
+        tip: 'http://host:port，扫描流量出口代理。' }
+    ];
+    var PLUGIN_LABEL = {
+      'hunter_qax': 'Hunter/奇安信', 'passivetotal': 'PassiveTotal(RiskIQ)',
+      'quake_360': 'Quake/360', 'securitytrails': 'SecurityTrails',
+      'virustotal': 'VirusTotal', 'zoomeye': 'ZoomEye', 'chaos': 'Chaos(ProjectDiscovery)'
+    };
+
+    function fieldRow(path, label, value, sensitive) {
+      var row = el('div', { 'class': 'mcp-field-row' });
+      var lb = el('span', { 'class': 'mcp-field-label' }, label);
+      var pin = el('input', { 'class': 'mcp-input',
+        placeholder: sensitive ? '敏感值已掩码，留原样则不修改' : '' });
+      pin.value = value || '';
+      row.appendChild(lb);
+      row.appendChild(pin);
+      inputs[path] = pin;
+      return row;
+    }
+
+    apiJson('GET', API + '/arlconfig', undefined, function (d) {
+      if (!globalPageState) return;          // 页面已撤下，丢弃过期响应
+      grid.textContent = '';
+      if (!d || !d.fields) {
+        var err = card(grid, '配置读取', true);
+        err.card.appendChild(el('div', { 'class': 'mcp-tip' },
+          (d && d.error) ? d.error : '加载失败：管理服务无响应'));
+        return;
+      }
+      note.textContent = '配置来源容器：' + (d.containers || []).join('、') +
+        '。掩码值（含 ****）视为未修改，不会覆盖；只提交有改动的字段。';
+
+      var byPath = {};
+      (d.fields || []).forEach(function (f) { byPath[f.path] = f; });
+      GROUPS.forEach(function (g) {
+        var c = card(grid, g.title);
+        g.paths.forEach(function (p) {
+          var f = byPath[p];
+          c.card.appendChild(fieldRow(p, f ? f.label : p,
+            f ? f.value : '', f ? f.sensitive : false));
+        });
+        if (g.tip) c.card.appendChild(el('div', { 'class': 'mcp-tip' }, g.tip));
+      });
+
+      /* 第三方测绘插件（QUERY_PLUGIN 中带 key 的）整行：插件双列排布 */
+      if ((d.plugins || []).length) {
+        var pc = card(grid, '第三方测绘插件（域名收集）', true);
+        pc.card.appendChild(el('div', { 'class': 'mcp-tip', style: 'margin-top:0;' },
+          '填好 key 并将 enable 改为 true 即启用；FOFA 插件复用上方 FOFA.Key，无需重复填写。'));
+        var pg = el('div', { 'class': 'mcp-plugin-grid' });
+        (d.plugins || []).forEach(function (pl) {
+          var box = el('div', { 'class': 'mcp-plugin' });
+          box.appendChild(el('div', { 'class': 'mcp-plugin-name' },
+            PLUGIN_LABEL[pl.name] || pl.name));
+          pl.fields.forEach(function (f) {
+            var path = 'QUERY_PLUGIN.' + pl.name + '.' + f.key;
+            box.appendChild(fieldRow(path,
+              f.key + (f.sensitive ? '（敏感）' : ''), f.value, f.sensitive));
+          });
+          pg.appendChild(box);
+        });
+        pc.card.appendChild(pg);
+      }
+    });
   }
 
   if (document.readyState === 'loading') {

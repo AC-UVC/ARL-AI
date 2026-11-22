@@ -69,9 +69,25 @@ if ! python3 -c "import ensurepip" >/dev/null 2>&1; then
     die "系统缺少 python venv/pip 支持，请手动安装后重试"
   fi
 fi
-docker ps --format '{{.Names}}' | grep -qx "$WEB_CONTAINER" \
+docker ps --format '{{.Names}}' > /tmp/.mcp_ins_names 2>/dev/null \
+  || die "docker 不可用"
+grep -qx "$WEB_CONTAINER" /tmp/.mcp_ins_names \
   || die "web 容器 $WEB_CONTAINER 未运行（原灯塔必须在线）"
-ss -lnt | grep -qE ":$MCP_PORT |:$ADMIN_PORT " && die "端口 $MCP_PORT/$ADMIN_PORT 已被占用"
+
+# ---------- 升级模式：已装过则先停 mcp-ai，释放端口（老版本重跑不报错的关键） ----------
+# 注意：set -o pipefail 下 systemctl|grep -q 会因 SIGPIPE 误判，改用单元文件存在性判断
+UPGRADE=0
+if [[ -f "/etc/systemd/system/$SERVICE_NAME.service" ]] && \
+   [[ "$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)" == "active" ]]; then
+  say "检测到已安装的 $SERVICE_NAME（升级模式：停止旧服务以释放端口）"
+  systemctl stop "$SERVICE_NAME"
+  UPGRADE=1
+fi
+
+ss -lnt > /tmp/.mcp_ins_ss 2>/dev/null || true
+grep -qE ":$MCP_PORT |:$ADMIN_PORT " /tmp/.mcp_ins_ss \
+  && { rm -f /tmp/.mcp_ins_names /tmp/.mcp_ins_ss; die "端口 $MCP_PORT/$ADMIN_PORT 已被占用"; }
+rm -f /tmp/.mcp_ins_names /tmp/.mcp_ins_ss
 [[ -f "$ARL_DIR/docker-compose.yml" ]] || die "未找到 $ARL_DIR/docker-compose.yml"
 [[ -f "$PKG_DIR/arl_mcp/server.py" && -f "$FILE_DIR/mcp_service.py" && -f "$FILE_DIR/mcp_panel.js" ]] \
   || die "缺少 arl_mcp/ 与 mcp_service.py、mcp_panel.js"
@@ -80,7 +96,8 @@ if [[ -f "$ARL_DIR/docker-compose.override.yml" ]]; then
     && warn "检测到上次安装残留（可能中途失败），继续覆盖安装（幂等）" \
     || die "已存在第三方 docker-compose.override.yml，为避免冲突请人工确认后移除"
 fi
-curl -sk "https://127.0.0.1:$WEB_PORT/" | grep -q mcp_panel.js \
+webroot=$(curl -sk "https://127.0.0.1:$WEB_PORT/" || true)
+[[ "$webroot" == *mcp_panel.js* ]] \
   && warn "前端已注入过 MCP，继续覆盖（幂等）"
 
 # ---------- 备份 ----------
@@ -93,6 +110,13 @@ docker exec "$WEB_CONTAINER" cp /etc/nginx/nginx.conf /tmp/nginx.conf.orig 2>/de
 # 从镜像提取出厂原始前端/nginx（重装时容器内 /code/frontend 已被挂载覆盖，不可用）
 say "从镜像提取原始前端并注入 MCP 栏目"
 WEB_IMAGE=$(docker inspect "$WEB_CONTAINER" --format '{{.Config.Image}}')
+# 记录旧注入版本号（浏览器缓存刷新用：升级后 ?v= 递增）
+OLD_PANEL_V=0
+if [[ -f "$ARL_DIR/frontend-mcp/index.html" ]]; then
+  OLD_PANEL_V=$(grep -oE 'mcp_panel\.js\?v=[0-9]+' "$ARL_DIR/frontend-mcp/index.html" 2>/dev/null \
+                | grep -oE '[0-9]+' | tail -1)
+  OLD_PANEL_V=${OLD_PANEL_V:-0}
+fi
 TMP_C=$(docker create "$WEB_IMAGE") || die "无法从镜像 $WEB_IMAGE 创建临时容器"
 rm -rf "$ARL_DIR/frontend-mcp"
 docker cp "$TMP_C:/code/frontend" "$ARL_DIR/frontend-mcp" || { docker rm -f "$TMP_C" >/dev/null 2>&1; die "前端提取失败（镜像内未找到 /code/frontend）"; }
@@ -100,18 +124,21 @@ docker cp "$TMP_C:/etc/nginx/nginx.conf" "$ARL_DIR/nginx-mcp.conf" || { docker r
 docker rm "$TMP_C" >/dev/null
 [[ -f "$ARL_DIR/frontend-mcp/index.html" ]] || die "前端提取不完整（index.html 缺失）"
 cp -a "$FILE_DIR/mcp_panel.js" "$ARL_DIR/frontend-mcp/mcp_panel.js"
-python3 - "$ARL_DIR/frontend-mcp/index.html" <<'PYEOF'
-import sys, io
-p = sys.argv[1]
+NEW_PANEL_V=$((OLD_PANEL_V + 1))
+python3 - "$ARL_DIR/frontend-mcp/index.html" "$NEW_PANEL_V" <<'PYEOF'
+import sys, io, re
+p, newv = sys.argv[1], int(sys.argv[2])
 html = io.open(p, encoding="utf-8").read()
 if 'mcp_panel.js' not in html:
-    tag = '<script src=/mcp_panel.js?v=1></script>'
+    tag = '<script src=/mcp_panel.js?v=%d></script>' % newv
     low = html.lower()
     i = low.rindex('</body>')
     io.open(p, "w", encoding="utf-8").write(html[:i] + tag + html[i:])
-    print("index.html 已注入")
+    print("index.html 已注入 (v=%d)" % newv)
 else:
-    print("index.html 已含注入")
+    html = re.sub(r'mcp_panel\.js\?v=\d+', 'mcp_panel.js?v=%d' % newv, html)
+    io.open(p, "w", encoding="utf-8").write(html)
+    print("index.html 缓存版本已升到 v=%d" % newv)
 PYEOF
 
 # ---------- nginx 注入（独立文件） ----------
@@ -172,34 +199,53 @@ echo "web 已恢复，注入生效"
 
 # ---------- MCP 专用账号（防挤占 admin 登录态） ----------
 say "创建 MCP 专用账号 arl_mcp（ARL 登录会覆盖同账号旧 token，专用账号互不影响）"
-MONGO_CONTAINER=$(docker ps --format '{{.Names}}' | grep -i mongo | head -1)
-[[ -n "$MONGO_CONTAINER" ]] || die "未找到 mongo 容器"
-MONGO_CLIENT=$(docker exec "$MONGO_CONTAINER" sh -c 'command -v mongosh || command -v mongo')
-[[ -n "$MONGO_CLIENT" ]] || die "mongo 容器内无 mongo/mongosh 客户端"
-read -r MONGO_USER MONGO_PASS MONGO_DB <<< "$(docker exec "$WEB_CONTAINER" python3 -c "
-import re
-s = open('/code/app/config.yaml').read()
-m = re.search(r\"URI\s*:\s*'mongodb://([^:]+):([^@]+)@\", s)
-d = re.search(r\"DB\s*:\s*'([^']+)'\", s)
-print(m.group(1), m.group(2), d.group(1))
-")"
-[[ -n "$MONGO_DB" ]] || die "无法从 web 容器读取 MONGO 配置"
+# 升级安装时沿用旧口令（避免每次重装都轮换，导致依赖该账号的既有集成失效）
 MCP_USER_NAME=arl_mcp
-MCP_USER_PASS=$(python3 -c "import secrets;print(secrets.token_urlsafe(18))")
+MCP_USER_PASS=""
+if [[ -f "/etc/systemd/system/$SERVICE_NAME.service" ]]; then
+  MCP_USER_PASS=$(sed -n 's/^Environment=ARL_PASS=//p' \
+    "/etc/systemd/system/$SERVICE_NAME.service" 2>/dev/null | head -1)
+fi
+if [[ -z "$MCP_USER_PASS" ]]; then
+  MCP_USER_PASS=$(python3 -c "import secrets;print(secrets.token_urlsafe(18))")
+  echo "MCP 专用账号新口令: $MCP_USER_PASS"
+else
+  echo "MCP 专用账号口令沿用旧值（升级保留）"
+fi
 HASH=$(python3 -c "import hashlib;print(hashlib.md5(('arlsalt!@#'+'$MCP_USER_PASS').encode()).hexdigest())")
-docker exec "$MONGO_CONTAINER" "$MONGO_CLIENT" -u "$MONGO_USER" -p "$MONGO_PASS" \
-  --authenticationDatabase admin --quiet --eval "
-var c = db.getSiblingDB('$MONGO_DB').user;
-var doc = c.findOne({username: '$MCP_USER_NAME'});
-if (doc) { c.updateOne({username: '$MCP_USER_NAME'}, {\$set: {password: '$HASH'}}); }
-else { c.insertOne({username: '$MCP_USER_NAME', password: '$HASH', token: null}); }
+# 直接在 web 容器内用灯塔自己的 pymongo + 自己的 MONGO URI 创建账号：
+# 不依赖外部 mongo 容器发现（多 mongo 实例/带认证的机器上，「第一个 mongo 容器」会写错库）
+docker exec -i "$WEB_CONTAINER" python3 - "$MCP_USER_NAME" "$HASH" <<'PYEOF' \
+  | grep -q "arl_mcp ready" || die "创建 arl_mcp 账号失败（pymongo 写入失败）"
+import sys, yaml
+from pymongo import MongoClient
+name, pwd_hash = sys.argv[1], sys.argv[2]
+y = yaml.safe_load(open('/code/app/config.yaml'))
+c = MongoClient(y['MONGO']['URI'], serverSelectionTimeoutMS=8000)
+col = c[y['MONGO']['DB']].user
+if col.find_one({'username': name}):
+    col.update_one({'username': name}, {'$set': {'password': pwd_hash}})
+else:
+    col.insert_one({'username': name, 'password': pwd_hash, 'token': None})
 print('arl_mcp ready')
-" | grep -q "arl_mcp ready" || die "创建 arl_mcp 账号失败"
-curl -sk -X POST "https://127.0.0.1:$WEB_PORT/api/user/login" \
-  -H 'Content-Type: application/json' \
-  -d "{\"username\":\"$MCP_USER_NAME\",\"password\":\"$MCP_USER_PASS\"}" \
-  | grep -q '"code":200' || die "arl_mcp 登录验证失败（灯塔 API 不通或账号异常）"
-echo "arl_mcp 账号就绪，登录验证通过"
+PYEOF
+# 登录验证带重试：web 刚重建时 gunicorn/mongo 连接可能仍在预热
+ok=""
+last_resp=""
+for i in 1 2 3 4 5 6; do
+  last_resp=$(curl -sk -m 10 -X POST "https://127.0.0.1:$WEB_PORT/api/user/login" \
+    -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$MCP_USER_NAME\",\"password\":\"$MCP_USER_PASS\"}" || true)
+  case "${last_resp// /}" in
+    *'"code":200'*) ok=1; break;;
+  esac
+  sleep 5
+done
+if [[ -n "$ok" ]]; then
+  echo "arl_mcp 账号就绪，登录验证通过"
+else
+  die "arl_mcp 登录验证失败（最后响应: ${last_resp:0:150}）"
+fi
 
 # ---------- MCP 服务 ----------
 say "安装 MCP 服务"
@@ -237,7 +283,9 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now "$SERVICE_NAME"
+  systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+  # restart 而非 enable --now：升级时新 mcp_service.py 必须重新加载才生效
+  systemctl restart "$SERVICE_NAME"
 else
   warn "无 systemd，手动启动: ARL_URL=https://127.0.0.1:$WEB_PORT ARL_MCP_WORKSPACE=$MCP_DIR MCP_PORT=$MCP_PORT MCP_ADMIN_PORT=$ADMIN_PORT $MCP_DIR/.venv/bin/python $MCP_DIR/mcp_service.py"
 fi
@@ -263,7 +311,7 @@ cat <<EOF
   MCP 服务        : http://$IP_SHOW:$MCP_PORT/mcp  （默认关闭，UI 里开）
   服务管理        : systemctl {status|restart|stop} $SERVICE_NAME
   密钥            : UI 面板里复制（X-API-Key 请求头鉴权）
-  MCP 专用账号    : $MCP_USER_NAME / $MCP_USER_PASS（勿用此账号登录浏览器；重装会重置口令）
+  MCP 专用账号    : $MCP_USER_NAME / $MCP_USER_PASS（勿用此账号登录浏览器；升级保留口令，全新安装生成新口令）
   MCP 服务目录    : $MCP_DIR
   【回滚】完全卸载 :
     systemctl disable --now $SERVICE_NAME && rm -f /etc/systemd/system/$SERVICE_NAME.service
