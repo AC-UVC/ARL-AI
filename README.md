@@ -67,6 +67,7 @@ bash overlay_install.sh --dir /opt/docker_arl --web-port 5003 --web-container ar
 
 ## 效果预览
 <img width="2560" height="1408" alt="image" src="https://github.com/user-attachments/assets/6db0e851-9447-40b1-88f1-b7b1ab84c45b" />
+<img width="2560" height="1406" alt="image" src="https://github.com/user-attachments/assets/1f137ee6-0cf3-4c74-b8c9-e355f540a56c" />
 
 ## 验证
 
